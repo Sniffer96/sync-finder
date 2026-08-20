@@ -1,0 +1,921 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Sync Finder</title>
+
+<style>
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: #111;
+  color: #f5f5f7;
+}
+
+main {
+  max-width: 760px;
+  margin: auto;
+  padding: 24px 18px 60px;
+}
+
+h1 {
+  font-size: 32px;
+  margin: 8px 0 6px;
+}
+
+.sub {
+  color: #aaa;
+  margin-bottom: 26px;
+  line-height: 1.4;
+}
+
+.card {
+  background: #1c1c1e;
+  border: 1px solid #333;
+  border-radius: 18px;
+  padding: 18px;
+  margin: 14px 0;
+}
+
+label {
+  display: block;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+input[type=file] {
+  width: 100%;
+  font-size: 16px;
+}
+
+button {
+  width: 100%;
+  border: 0;
+  border-radius: 14px;
+  padding: 15px;
+  font-size: 17px;
+  font-weight: 700;
+  margin-top: 14px;
+  background: #fff;
+  color: #000;
+}
+
+button:disabled {
+  opacity: .4;
+}
+
+#status {
+  white-space: pre-wrap;
+  line-height: 1.45;
+  color: #c7c7cc;
+}
+
+.result {
+  font-size: 28px;
+  font-variant-numeric: tabular-nums;
+  margin: 10px 0;
+}
+
+.small {
+  color: #999;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+progress {
+  width: 100%;
+  height: 12px;
+}
+</style>
+</head>
+
+<body>
+
+<main>
+
+<h1>Sync Finder</h1>
+
+<div class="sub">
+Trova automaticamente dove l'audio di una clip compare nella registrazione master.
+Tutto viene elaborato nel browser.
+</div>
+
+<div class="card">
+<label>1. Audio master continuo</label>
+<input
+  id="master"
+  type="file"
+  accept="audio/*,.m4a,.mp3,.wav,.aac">
+</div>
+
+<div class="card">
+<label>2. Audio della clip</label>
+<input
+  id="clip"
+  type="file"
+  accept="audio/*,.m4a,.mp3,.wav,.aac">
+</div>
+
+<button id="go">
+Trova sincronizzazione
+</button>
+
+<div class="card">
+<label>Stato</label>
+
+<progress
+  id="prog"
+  max="100"
+  value="0">
+</progress>
+
+<div id="status">
+Pronto.
+</div>
+</div>
+
+<div
+  class="card"
+  id="out"
+  hidden>
+
+<label>Risultato</label>
+
+<div
+  class="result"
+  id="time">
+00:00:00.000
+</div>
+
+<div id="score"></div>
+
+<div class="small">
+Il tempo indica il punto del master in cui dovrebbe iniziare
+l'audio della clip.
+Verifica sempre a orecchio prima del montaggio definitivo.
+</div>
+
+</div>
+
+<div class="small">
+Suggerimento: usa una clip con almeno 10–20 secondi
+di parlato, rumori o musica in comune con il master.
+Silenzio quasi totale, vento forte o audio molto diverso
+possono ridurre l'affidabilità.
+</div>
+
+</main>
+
+<script>
+
+const $ = s => document.querySelector(s);
+
+const ctx =
+  new (window.AudioContext || window.webkitAudioContext)();
+
+function setStatus(s, p = null) {
+  $('#status').textContent = s;
+
+  if (p !== null) {
+    $('#prog').value = p;
+  }
+}
+
+async function decodeFile(file) {
+
+  const ab = await file.arrayBuffer();
+
+  return await ctx.decodeAudioData(
+    ab.slice(0)
+  );
+}
+
+function monoSamples(buf) {
+
+  const n = buf.length;
+  const ch = buf.numberOfChannels;
+
+  const out =
+    new Float32Array(n);
+
+  for (let c = 0; c < ch; c++) {
+
+    const d =
+      buf.getChannelData(c);
+
+    for (let i = 0; i < n; i++) {
+
+      out[i] +=
+        d[i] / ch;
+    }
+  }
+
+  return out;
+}
+
+function envelope(buf, fps) {
+
+  const x =
+    monoSamples(buf);
+
+  const step =
+    Math.max(
+      1,
+      Math.floor(
+        buf.sampleRate / fps
+      )
+    );
+
+  const count =
+    Math.floor(
+      x.length / step
+    );
+
+  const e =
+    new Float32Array(count);
+
+  for (let k = 0; k < count; k++) {
+
+    let ss = 0;
+
+    const a =
+      k * step;
+
+    const b =
+      Math.min(
+        x.length,
+        a + step
+      );
+
+    for (let i = a; i < b; i++) {
+
+      const v = x[i];
+
+      ss +=
+        v * v;
+    }
+
+    e[k] =
+      Math.log(
+        1e-8 +
+        Math.sqrt(
+          ss /
+          Math.max(
+            1,
+            b - a
+          )
+        )
+      );
+  }
+
+  const d =
+    new Float32Array(
+      Math.max(
+        0,
+        e.length - 1
+      )
+    );
+
+  for (
+    let i = 1;
+    i < e.length;
+    i++
+  ) {
+
+    d[i - 1] =
+      e[i] - e[i - 1];
+  }
+
+  return d;
+}
+
+function zscore(a) {
+
+  let m = 0;
+
+  for (const v of a) {
+    m += v;
+  }
+
+  m /=
+    Math.max(
+      1,
+      a.length
+    );
+
+  let s = 0;
+
+  for (const v of a) {
+
+    const d =
+      v - m;
+
+    s +=
+      d * d;
+  }
+
+  s =
+    Math.sqrt(
+      s /
+      Math.max(
+        1,
+        a.length
+      )
+    ) +
+    1e-9;
+
+  const o =
+    new Float32Array(
+      a.length
+    );
+
+  for (
+    let i = 0;
+    i < a.length;
+    i++
+  ) {
+
+    o[i] =
+      (a[i] - m) / s;
+  }
+
+  return o;
+}
+
+function chooseSegment(a, fps) {
+
+  let start =
+    Math.min(
+      a.length,
+      Math.floor(
+        fps * 1
+      )
+    );
+
+  let len =
+    Math.min(
+      a.length - start,
+      Math.floor(
+        fps * 60
+      )
+    );
+
+  if (
+    len <
+    Math.floor(
+      fps * 5
+    )
+  ) {
+
+    start = 0;
+    len = a.length;
+  }
+
+  return a.slice(
+    start,
+    start + len
+  );
+}
+
+function coarseMatch(
+  master,
+  clip,
+  fps
+) {
+
+  const c =
+    zscore(
+      chooseSegment(
+        clip,
+        fps
+      )
+    );
+
+  const m =
+    zscore(master);
+
+  if (
+    c.length < 10 ||
+    m.length < c.length
+  ) {
+
+    throw new Error(
+      "Audio troppo corto oppure master più corto della clip."
+    );
+  }
+
+  const samples =
+    Math.min(
+      220,
+      c.length
+    );
+
+  const idx =
+    new Int32Array(samples);
+
+  for (
+    let j = 0;
+    j < samples;
+    j++
+  ) {
+
+    idx[j] =
+      Math.floor(
+        j *
+        (c.length - 1) /
+        Math.max(
+          1,
+          samples - 1
+        )
+      );
+  }
+
+  let best =
+    -Infinity;
+
+  let bestI =
+    0;
+
+  const maxI =
+    m.length -
+    c.length;
+
+  for (
+    let i = 0;
+    i <= maxI;
+    i++
+  ) {
+
+    let dot = 0;
+    let mm = 0;
+    let cc = 0;
+
+    for (
+      let q = 0;
+      q < samples;
+      q++
+    ) {
+
+      const j =
+        idx[q];
+
+      const x =
+        c[j];
+
+      const y =
+        m[i + j];
+
+      dot +=
+        x * y;
+
+      cc +=
+        x * x;
+
+      mm +=
+        y * y;
+    }
+
+    const sc =
+      dot /
+      (
+        Math.sqrt(
+          cc * mm
+        ) +
+        1e-9
+      );
+
+    if (
+      sc > best
+    ) {
+
+      best =
+        sc;
+
+      bestI =
+        i;
+    }
+  }
+
+  return {
+    sec:
+      bestI / fps - 1,
+
+    score:
+      best
+  };
+}
+
+function fineMatch(
+  masterBuf,
+  clipBuf,
+  roughSec
+) {
+
+  const fps =
+    80;
+
+  const m =
+    zscore(
+      envelope(
+        masterBuf,
+        fps
+      )
+    );
+
+  const c0 =
+    envelope(
+      clipBuf,
+      fps
+    );
+
+  const skip =
+    Math.min(
+      c0.length,
+      Math.floor(
+        fps * 1
+      )
+    );
+
+  const c =
+    zscore(
+      c0.slice(
+        skip,
+        Math.min(
+          c0.length,
+          skip +
+          Math.floor(
+            fps * 30
+          )
+        )
+      )
+    );
+
+  if (
+    c.length < 20
+  ) {
+
+    return {
+      sec:
+        Math.max(
+          0,
+          roughSec
+        ),
+
+      score:
+        0
+    };
+  }
+
+  const center =
+    Math.floor(
+      (roughSec + 1) *
+      fps
+    );
+
+  const radius =
+    Math.floor(
+      3 * fps
+    );
+
+  let lo =
+    Math.max(
+      0,
+      center - radius
+    );
+
+  let hi =
+    Math.min(
+      m.length -
+      c.length,
+      center +
+      radius
+    );
+
+  let best =
+    -Infinity;
+
+  let bestI =
+    lo;
+
+  for (
+    let i = lo;
+    i <= hi;
+    i++
+  ) {
+
+    let dot = 0;
+    let mm = 0;
+    let cc = 0;
+
+    for (
+      let j = 0;
+      j < c.length;
+      j++
+    ) {
+
+      const x =
+        c[j];
+
+      const y =
+        m[i + j];
+
+      dot +=
+        x * y;
+
+      cc +=
+        x * x;
+
+      mm +=
+        y * y;
+    }
+
+    const sc =
+      dot /
+      (
+        Math.sqrt(
+          cc * mm
+        ) +
+        1e-9
+      );
+
+    if (
+      sc > best
+    ) {
+
+      best =
+        sc;
+
+      bestI =
+        i;
+    }
+  }
+
+  return {
+    sec:
+      Math.max(
+        0,
+        bestI / fps - 1
+      ),
+
+    score:
+      best
+  };
+}
+
+function fmt(sec) {
+
+  sec =
+    Math.max(
+      0,
+      sec
+    );
+
+  let h =
+    Math.floor(
+      sec / 3600
+    );
+
+  sec -=
+    h * 3600;
+
+  let m =
+    Math.floor(
+      sec / 60
+    );
+
+  sec -=
+    m * 60;
+
+  let s =
+    Math.floor(sec);
+
+  let ms =
+    Math.round(
+      (sec - s) *
+      1000
+    );
+
+  if (
+    ms === 1000
+  ) {
+
+    ms = 0;
+    s++;
+  }
+
+  return [
+    h,
+    m,
+    s
+  ]
+  .map(
+    v =>
+      String(v)
+      .padStart(
+        2,
+        '0'
+      )
+  )
+  .join(':')
+  +
+  '.'
+  +
+  String(ms)
+  .padStart(
+    3,
+    '0'
+  );
+}
+
+$('#go').onclick =
+async () => {
+
+  const mf =
+    $('#master')
+    .files[0];
+
+  const cf =
+    $('#clip')
+    .files[0];
+
+  if (
+    !mf ||
+    !cf
+  ) {
+
+    alert(
+      "Seleziona sia il master sia l'audio della clip."
+    );
+
+    return;
+  }
+
+  $('#go').disabled =
+    true;
+
+  $('#out').hidden =
+    true;
+
+  try {
+
+    await ctx.resume();
+
+    setStatus(
+      "Decodifico il master…",
+      10
+    );
+
+    const mb =
+      await decodeFile(mf);
+
+    setStatus(
+      "Decodifico la clip…",
+      25
+    );
+
+    const cb =
+      await decodeFile(cf);
+
+    setStatus(
+      "Creo le impronte audio…",
+      40
+    );
+
+    await new Promise(
+      r =>
+        setTimeout(
+          r,
+          30
+        )
+    );
+
+    const fps =
+      10;
+
+    const me =
+      envelope(
+        mb,
+        fps
+      );
+
+    const ce =
+      envelope(
+        cb,
+        fps
+      );
+
+    setStatus(
+      "Cerco la corrispondenza nel master…",
+      60
+    );
+
+    await new Promise(
+      r =>
+        setTimeout(
+          r,
+          30
+        )
+    );
+
+    const coarse =
+      coarseMatch(
+        me,
+        ce,
+        fps
+      );
+
+    setStatus(
+      "Affino la sincronizzazione…",
+      85
+    );
+
+    await new Promise(
+      r =>
+        setTimeout(
+          r,
+          30
+        )
+    );
+
+    const fine =
+      fineMatch(
+        mb,
+        cb,
+        coarse.sec
+      );
+
+    const combined =
+      Number.isFinite(
+        fine.score
+      )
+      ?
+      fine
+      :
+      coarse;
+
+    $('#time').textContent =
+      fmt(
+        combined.sec
+      );
+
+    const pct =
+      Math.max(
+        0,
+        Math.min(
+          100,
+          Math.round(
+            (
+              combined.score +
+              1
+            ) *
+            50
+          )
+        )
+      );
+
+    $('#score').textContent =
+      "Somiglianza indicativa: "
+      +
+      pct
+      +
+      "%";
+
+    $('#out').hidden =
+      false;
+
+    setStatus(
+      "Fatto.",
+      100
+    );
+
+  }
+  catch (e) {
+
+    console.error(e);
+
+    setStatus(
+      "Errore: "
+      +
+      e.message
+      +
+      "\n\nSe il file non viene letto, prova a convertirlo/esportarlo come M4A, MP3 o WAV.",
+      0
+    );
+  }
+  finally {
+
+    $('#go').disabled =
+      false;
+  }
+};
+
+</script>
+
+</body>
+</html>
